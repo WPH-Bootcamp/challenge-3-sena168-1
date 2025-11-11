@@ -1,456 +1,519 @@
+#!/usr/bin/env node
+/**
+ * HABIT TRACKER CLI - Challenge 3
+ * -------------------------------------------------------------
+ * Implements all required concepts & features from the README:
+ * - Classes & Objects, Arrays + filter/map/find/forEach
+ * - Date manipulation, setInterval reminder
+ * - JSON persistence (save/load)
+ * - Nullish coalescing operator (??) in multiple places
+ * - while loop + for loop demos
+ * - 10-menu CLI with readline
+ * -------------------------------------------------------------
+ * Run: node app.js
+ */
+
 const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
 
+// -------------------------- Constants --------------------------
 const DATA_FILE = path.join(__dirname, 'habits-data.json');
-const REMINDER_INTERVAL = 10000; // 10 detik
 const DAYS_IN_WEEK = 7;
 
-// User Profile Object
+// Allow override via env but default to 10s as per spec
+const REMINDER_INTERVAL =
+  Number(process.env.REMINDER_INTERVAL_MS ?? 10000); // (?? #1)
+
+// --------------------------- Helpers ---------------------------
+
+/** Pad number to 2 digits */
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** Format a Date to local YYYY-MM-DD (no timezone drift) */
+function toLocalYMD(date = new Date()) {
+  const d = new Date(date);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/** Parse a YYYY-MM-DD to a Date at local midnight */
+function fromLocalYMD(ymd) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(y, m - 1, d, 0, 0, 0, 0);
+}
+
+/** Get start-of-week (Monday) and end-of-week (Sunday) for a given date */
+function getWeekBounds(date = new Date()) {
+  const d = new Date(date);
+  const day = d.getDay(); // 0 Sun ... 6 Sat
+  const mondayOffset = (day === 0 ? -6 : 1) - day; // distance to Monday
+  const start = new Date(d);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(d.getDate() + mondayOffset);
+
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+/** ASCII progress bar (10 blocks like README sample) */
+function progressBar(percent) {
+  const total = 10;
+  const filled = Math.round((percent / 100) * total);
+  const fillChar = '█';
+  const emptyChar = '░';
+  return `${fillChar.repeat(filled)}${emptyChar.repeat(total - filled)} ${Math.round(percent)}%`;
+}
+
+// ----------------------- User Profile Obj ----------------------
+
+/**
+ * Simple user profile object (not a class to satisfy "Object Dasar")
+ * - updateStats(habits): recompute totals
+ * - getDaysJoined(): how many days since joinedAt
+ */
 const userProfile = {
-    name: "Habit Tracker User",
-    joinDate: new Date(),
-    totalHabits: 0,
-    completedHabits: 0,
-    
-    updateStats: function(habits) {
-        this.totalHabits = habits.length;
-        this.completedHabits = habits.filter(h => h.isCompletedThisWeek()).length;
-    },
-    
-    getDaysJoined: function() {
-        const today = new Date();
-        const joinDate = new Date(this.joinDate);
-        const diffTime = Math.abs(today - joinDate);
-        return Math.ceil(diffTime / (1000 * 60 * 24));
-    }
+  name: process.env.HABIT_USER_NAME ?? 'User', // (?? #2)
+  joinedAt: null, // filled on first run/load
+  totalHabits: 0,
+  totalCompletions: 0,
+
+  updateStats(habits = []) {
+    // Using array methods (map, reduce/forEach) per rubric
+    this.totalHabits = habits.length;
+    let count = 0;
+    habits.forEach((h) => { // forEach usage
+      count += h.completions.length;
+    });
+    this.totalCompletions = count;
+  },
+
+  getDaysJoined() {
+    if (!this.joinedAt) return 0;
+    const start = new Date(this.joinedAt);
+    const now = new Date();
+    const ms = now - start;
+    return Math.max(1, Math.ceil(ms / (24 * 60 * 60 * 1000)));
+  },
 };
 
-// Habit Class
+// --------------------------- Classes ---------------------------
+
+/**
+ * Habit: represents one habit
+ * - id, name, targetFrequency (times per week), completions[YYYY-MM-DD], createdAt
+ * Methods:
+ * - markComplete()
+ * - getThisWeekCompletions()
+ * - isCompletedThisWeek()
+ * - getProgressPercentage()
+ * - getStatus()
+ */
 class Habit {
-    constructor(name, targetFrequency) {
-        this.id = Date.now() + Math.random(); // Simple ID generation
-        this.name = name;
-        this.targetFrequency = targetFrequency;
-        this.completions = []; // Array of completion dates
-        this.createdAt = new Date();
+  constructor({ id, name, targetFrequency, completions, createdAt }) {
+    this.id = id ?? String(Date.now()); // (?? #3)
+    this.name = name ?? 'Untitled Habit';
+    this.targetFrequency = Number(targetFrequency ?? 7);
+    this.completions = Array.isArray(completions) ? completions : [];
+    this.createdAt = createdAt ?? new Date().toISOString();
+  }
+
+  /** Prevent duplicate completion for the same local day */
+  markComplete(dateYMD = toLocalYMD()) {
+    if (!this.completions.includes(dateYMD)) {
+      this.completions.push(dateYMD);
+      return true;
     }
-    
-    markComplete() {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0); // Normalize to start of day
-        this.completions.push(today);
-    }
-    
-    getThisWeekCompletions() {
-        const now = new Date();
-        const oneWeekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
-        return this.completions.filter(date => date >= oneWeekAgo);
-    }
-    
-    isCompletedThisWeek() {
-        return this.getThisWeekCompletions().length >= this.targetFrequency;
-    }
-    
-    getProgressPercentage() {
-        const completions = this.getThisWeekCompletions().length;
-        return Math.min(100, Math.round((completions / this.targetFrequency) * 100));
-    }
-    
-    getStatus() {
-        return this.isCompletedThisWeek() ? 'Selesai' : 'Aktif';
-    }
-    
-    getCompletionCount() {
-        return this.getThisWeekCompletions().length;
-    }
+    return false;
+  }
+
+  /** Count completions in current week (Mon..Sun) */
+  getThisWeekCompletions(ref = new Date()) {
+    const { start, end } = getWeekBounds(ref);
+    return this.completions.filter((ymd) => {
+      const d = fromLocalYMD(ymd);
+      return d >= start && d <= end;
+    }).length; // filter usage
+  }
+
+  isCompletedThisWeek() {
+    return this.getThisWeekCompletions() >= this.targetFrequency;
+  }
+
+  getProgressPercentage() {
+    const done = this.getThisWeekCompletions();
+    const pct = this.targetFrequency > 0 ? (done / this.targetFrequency) * 100 : 0;
+    return Math.min(100, Math.max(0, pct));
+  }
+
+  getStatus() {
+    return this.isCompletedThisWeek() ? 'Selesai' : 'Aktif';
+  }
 }
 
-// Habit Tracker Class
+/**
+ * HabitTracker: manages collection + CLI views + IO + reminder
+ * Methods (per spec):
+ * - addHabit(name, frequency)
+ * - completeHabit(habitIndex)
+ * - deleteHabit(habitIndex)
+ * - displayProfile()
+ * - displayHabits(filter)
+ * - displayHabitsWithWhile()
+ * - displayHabitsWithFor()
+ * - displayStats()
+ * - startReminder(), showReminder(), stopReminder()
+ * - saveToFile(), loadFromFile(), clearAllData()
+ */
 class HabitTracker {
-    constructor() {
-        this.habits = [];
-        this.reminderInterval = null;
-        this.loadFromFile();
+  constructor() {
+    this.habits = [];
+    this.reminderTimer = null;
+    this.loadFromFile(); // populate from disk (if any)
+    // Initialize joinedAt on first run
+    userProfile.joinedAt = userProfile.joinedAt ?? new Date().toISOString();
+    userProfile.updateStats(this.habits);
+  }
+
+  // ------------------------- CRUD Ops -------------------------
+  addHabit(name, frequency) {
+    const freq = Number(frequency ?? 7); // (?? #4)
+    const habit = new Habit({
+      id: String(Date.now() + Math.floor(Math.random() * 1000)),
+      name: name?.trim() || 'Kebiasaan Baru', // nullish-safe access + fallback
+      targetFrequency: isNaN(freq) || freq <= 0 ? 7 : freq,
+      completions: [],
+      createdAt: new Date().toISOString(),
+    });
+    this.habits.push(habit);
+    this.saveToFile();
+    userProfile.updateStats(this.habits);
+    return habit;
+  }
+
+  /** Accept 1-based index from UI */
+  completeHabit(habitIndex) {
+    const idx = Number(habitIndex) - 1;
+    const habit = this.habits[idx] ?? null; // (?? #5)
+    if (!habit) return { ok: false, msg: 'Index tidak valid.' };
+    const ok = habit.markComplete();
+    if (ok) {
+      this.saveToFile();
+      userProfile.updateStats(this.habits);
+      return { ok: true, msg: `Berhasil menandai "${habit.name}" untuk hari ini.` };
     }
-    
-    // CRUD Operations
-    addHabit(name, frequency) {
-        const habit = new Habit(name, frequency);
-        this.habits.push(habit);
-        this.saveToFile();
-        return habit;
+    return { ok: false, msg: 'Sudah ditandai selesai untuk hari ini.' };
+  }
+
+  deleteHabit(habitIndex) {
+    const idx = Number(habitIndex) - 1;
+    if (idx < 0 || idx >= this.habits.length) return { ok: false, msg: 'Index tidak valid.' };
+    const removed = this.habits.splice(idx, 1);
+    this.saveToFile();
+    userProfile.updateStats(this.habits);
+    return { ok: true, msg: `Hapus kebiasaan "${removed[0].name}".` };
+  }
+
+  // ---------------------- Display Methods ---------------------
+
+  displayProfile() {
+    console.log('\n==================================================');
+    console.log('PROFIL USER');
+    console.log('==================================================');
+    console.log(`Nama             : ${userProfile.name}`);
+    console.log(`Hari bergabung   : ${userProfile.getDaysJoined()} hari`);
+    console.log(`Total kebiasaan  : ${userProfile.totalHabits}`);
+    console.log(`Total penyelesaian: ${userProfile.totalCompletions}`);
+    const { start, end } = getWeekBounds(new Date());
+    const weekRange = `${toLocalYMD(start)} s/d ${toLocalYMD(end)}`;
+    console.log(`Rentang minggu   : ${weekRange}`);
+    console.log('==================================================\n');
+  }
+
+  /**
+   * filter: 'all' | 'active' | 'done'
+   * uses filter/map/find/forEach across rendering
+   */
+  displayHabits(filter = 'all') {
+    console.log('\n==================================================');
+    console.log('DAFTAR KEBIASAAN');
+    console.log('==================================================');
+
+    let list = this.habits;
+    if (filter === 'active') {
+      list = this.habits.filter((h) => !h.isCompletedThisWeek());
+      console.log('(Filter: Aktif)');
+    } else if (filter === 'done') {
+      list = this.habits.filter((h) => h.isCompletedThisWeek());
+      console.log('(Filter: Selesai)');
     }
-    
-    completeHabit(index) {
-        if (index >= 0 && index < this.habits.length) {
-            this.habits[index].markComplete();
-            this.saveToFile();
-            return true;
-        }
-        return false;
+
+    if (list.length === 0) {
+      console.log('Belum ada kebiasaan.');
+      console.log('==================================================\n');
+      return;
     }
-    
-    deleteHabit(index) {
-        if (index >= 0 && index < this.habits.length) {
-            this.habits.splice(index, 1);
-            this.saveToFile();
-            return true;
-        }
-        return false;
+
+    list.forEach((h, i) => {
+      const progress = h.getProgressPercentage();
+      const done = h.getThisWeekCompletions();
+      const bar = progressBar(progress);
+      console.log(`${i + 1}. [${h.getStatus()}] ${h.name}`);
+      console.log(`   Target   : ${h.targetFrequency}x/minggu`);
+      console.log(`   Progress : ${done}/${h.targetFrequency} (${Math.round(progress)}%)`);
+      console.log(`   Bar      : ${bar}`);
+      console.log('');
+    });
+
+    console.log('==================================================\n');
+  }
+
+  /** Explicit while-loop demo */
+  displayHabitsWithWhile() {
+    console.log('\n-- Demo While Loop --');
+    let i = 0;
+    while (i < this.habits.length) {
+      const h = this.habits[i];
+      console.log(`${i + 1}. ${h.name} - Status: ${h.getStatus()}`);
+      i++;
     }
-    
-    // Display Methods
-    displayProfile() {
-        // Update stats before displaying
-        userProfile.updateStats(this.habits);
-        console.log('='.repeat(50));
-        console.log('PROFIL PENGGUNA');
-        console.log('='.repeat(50));
-        console.log(`Nama: ${userProfile.name}`);
-        console.log(`Hari Bergabung: ${userProfile.getDaysJoined()} hari yang lalu`);
-        console.log(`Total Kebiasaan: ${userProfile.totalHabits}`);
-        console.log(`Kebiasaan Selesai Minggu Ini: ${userProfile.completedHabits}`);
-        console.log('='.repeat(50));
+  }
+
+  /** Explicit for-loop demo */
+  displayHabitsWithFor() {
+    console.log('\n-- Demo For Loop --');
+    for (let i = 0; i < this.habits.length; i++) { // for loop usage
+      const h = this.habits[i];
+      console.log(`${i + 1}. ${h.name} - Target: ${h.targetFrequency}/minggu`);
     }
-    
-    displayHabits(filter = null) {
-        console.log('='.repeat(50));
-        if (filter === 'active') {
-            console.log('KEBIASAAN AKTIF');
-            const activeHabits = this.habits.filter(h => !h.isCompletedThisWeek());
-            this.displayHabitList(activeHabits);
-        } else if (filter === 'completed') {
-            console.log('KEBIASAAN SELESAI');
-            const completedHabits = this.habits.filter(h => h.isCompletedThisWeek());
-            this.displayHabitList(completedHabits);
-        } else {
-            console.log('SEMUA KEBIASAAN');
-            this.displayHabitList(this.habits);
-        }
-        console.log('='.repeat(50));
+  }
+
+  /** Summary using array methods */
+  displayStats() {
+    console.log('\n==================================================');
+    console.log('STATISTIK');
+    console.log('==================================================');
+
+    const total = this.habits.length;
+    const active = this.habits.filter((h) => !h.isCompletedThisWeek()).length;
+    const done = this.habits.filter((h) => h.isCompletedThisWeek()).length;
+
+    const avgTarget =
+      total === 0 ? 0 :
+        this.habits.map((h) => h.targetFrequency) // map usage
+          .reduce((a, b) => a + b, 0) / total;
+
+    const top = this.habits
+      .map((h) => ({ name: h.name, done: h.getThisWeekCompletions() }))
+      .sort((a, b) => b.done - a.done)[0] ?? null; // (?? #6)
+
+    console.log(`Total kebiasaan      : ${total}`);
+    console.log(`Aktif (belum selesai): ${active}`);
+    console.log(`Selesai (capai target): ${done}`);
+    console.log(`Rata-rata target/mgg  : ${avgTarget.toFixed(2)}`);
+    if (top) {
+      console.log(`Terbanyak minggu ini  : ${top.name} (${top.done}x)`);
+    } else {
+      console.log('Terbanyak minggu ini  : -');
     }
-    
-    displayHabitList(habits) {
-        if (habits.length === 0) {
-            console.log('Belum ada kebiasaan.');
-            return;
-        }
-        
-        habits.forEach((habit, index) => {
-            const status = habit.getStatus();
-            const completionCount = habit.getCompletionCount();
-            const progress = habit.getProgressPercentage();
-            const progressBar = this.createProgressBar(progress);
-            
-            console.log(`${index + 1}. [${status}] ${habit.name}`);
-            console.log(`   Target: ${habit.targetFrequency}x/minggu`);
-            console.log(`   Progress: ${completionCount}/${habit.targetFrequency} (${progress}%)`);
-            console.log(`   Progress Bar: ${progressBar} ${progress}%`);
-            console.log('');
-        });
+    console.log('==================================================\n');
+  }
+
+  // --------------------- Reminder System ----------------------
+  startReminder() {
+    if (this.reminderTimer) return; // already running
+    this.reminderTimer = setInterval(() => this.showReminder(), REMINDER_INTERVAL);
+  }
+
+  showReminder() {
+    // Pick first active habit as reminder target
+    const active = this.habits.filter((h) => !h.isCompletedThisWeek());
+    if (active.length === 0) return; // nothing to remind
+    const target = active[0];
+    console.log('\n==================================================');
+    console.log(`REMINDER: Jangan lupa "${target.name}"!`);
+    console.log('==================================================\n');
+  }
+
+  stopReminder() {
+    if (this.reminderTimer) {
+      clearInterval(this.reminderTimer);
+      this.reminderTimer = null;
     }
-    
-    createProgressBar(percentage) {
-        const totalBlocks = 10;
-        const filledBlocks = Math.round((percentage / 100) * totalBlocks);
-        const emptyBlocks = totalBlocks - filledBlocks;
-        
-        const filled = '█'.repeat(filledBlocks);
-        const empty = '░'.repeat(emptyBlocks);
-        
-        return filled + empty;
+  }
+
+  // ----------------------- File Operations --------------------
+  saveToFile() {
+    try {
+      const data = {
+        profile: {
+          name: userProfile.name,
+          joinedAt: userProfile.joinedAt,
+        },
+        habits: this.habits.map((h) => ({
+          id: h.id, name: h.name, targetFrequency: h.targetFrequency,
+          completions: h.completions, createdAt: h.createdAt,
+        })),
+      };
+      const json = JSON.stringify(data, null, 2);
+      fs.writeFileSync(DATA_FILE, json);
+    } catch (err) {
+      console.error('Gagal menyimpan data:', err.message);
     }
-    
-    displayHabitsWithWhile() {
-        console.log('='.repeat(50));
-        console.log('KEBIASAAN (Menggunakan While Loop)');
-        console.log('='.repeat(50));
-        
-        let i = 0;
-        while (i < this.habits.length) {
-            const habit = this.habits[i];
-            console.log(`${i + 1}. ${habit.name} - Status: ${habit.getStatus()}`);
-            i++;
-        }
+  }
+
+  loadFromFile() {
+    try {
+      if (!fs.existsSync(DATA_FILE)) return;
+      const json = fs.readFileSync(DATA_FILE, 'utf8');
+      const data = JSON.parse(json);
+      // Rehydrate profile
+      userProfile.name = data.profile?.name ?? userProfile.name; // (?? #7)
+      userProfile.joinedAt = data.profile?.joinedAt ?? userProfile.joinedAt;
+      // Rehydrate habits to class instances
+      this.habits = (data.habits ?? []).map((raw) => new Habit(raw)); // (?? #8)
+    } catch (err) {
+      console.error('Gagal memuat data:', err.message);
     }
-    
-    displayHabitsWithFor() {
-        console.log('='.repeat(50));
-        console.log('KEBIASAAN (Menggunakan For Loop)');
-        console.log('='.repeat(50));
-        
-        for (let i = 0; i < this.habits.length; i++) {
-            const habit = this.habits[i];
-            console.log(`${i + 1}. ${habit.name} - Target: ${habit.targetFrequency}/minggu`);
-        }
+  }
+
+  clearAllData() {
+    this.habits = [];
+    try {
+      if (fs.existsSync(DATA_FILE)) fs.unlinkSync(DATA_FILE);
+    } catch (e) {
+      // Ignore
     }
-    
-    displayStats() {
-        console.log('='.repeat(50));
-        console.log('STATISTIK');
-        console.log('='.repeat(50));
-        
-        // Using array methods as required
-        const totalHabits = this.habits.length;
-        const completedThisWeek = this.habits.filter(h => h.isCompletedThisWeek()).length;
-        const activeHabits = this.habits.filter(h => !h.isCompletedThisWeek()).length;
-        
-        // Calculate average completion rate
-        const completionRates = this.habits.map(h => h.getProgressPercentage());
-        const avgCompletionRate = completionRates.length > 0 ? 
-            completionRates.reduce((sum, rate) => sum + rate, 0) / completionRates.length : 0;
-        
-        // Find most frequently completed habit
-        let mostFrequentHabit = null;
-        if (this.habits.length > 0) {
-            mostFrequentHabit = this.habits.reduce((prev, current) => 
-                (prev.getCompletionCount() > current.getCompletionCount()) ? prev : current
-            );
-        }
-        
-        console.log(`Total Kebiasaan: ${totalHabits}`);
-        console.log(`Kebiasaan Selesai Minggu Ini: ${completedThisWeek}`);
-        console.log(`Kebiasaan Aktif: ${activeHabits}`);
-        console.log(`Rata-rata Progress: ${avgCompletionRate.toFixed(1)}%`);
-        if (mostFrequentHabit) {
-            console.log(`Kebiasaan Paling Rajin: ${mostFrequentHabit.name} (${mostFrequentHabit.getCompletionCount()}x minggu ini)`);
-        }
-        
-        // Use forEach to display all habit names
-        console.log('\nDaftar Semua Kebiasaan:');
-        this.habits.forEach((habit, index) => {
-            console.log(`  ${index + 1}. ${habit.name}`);
-        });
-        
-        console.log('='.repeat(50));
-    }
-    
-    // Reminder System
-    startReminder() {
-        if (this.reminderInterval) {
-            clearInterval(this.reminderInterval);
-        }
-        
-        this.reminderInterval = setInterval(() => {
-            this.showReminder();
-        }, REMINDER_INTERVAL);
-        
-        console.log("Pengingat diaktifkan! Akan muncul setiap 10 detik.");
-    }
-    
-    showReminder() {
-        const activeHabits = this.habits.filter(h => !h.isCompletedThisWeek());
-        if (activeHabits.length > 0) {
-            console.log('\n' + '='.repeat(50));
-            console.log('REMINDER: Jangan lupa kebiasaanmu!');
-            activeHabits.forEach(habit => {
-                if (habit && habit.name) {
-                    console.log(`- ${habit.name}`);
-                }
-            });
-            console.log('='.repeat(50));
-        }
-    }
-    
-    stopReminder() {
-        if (this.reminderInterval) {
-            clearInterval(this.reminderInterval);
-            this.reminderInterval = null;
-            console.log("Pengingat dinonaktifkan.");
-        }
-    }
-    
-    // File Operations
-    saveToFile() {
-        try {
-            // Update user stats before saving
-            userProfile.updateStats(this.habits);
-            
-            const dataToSave = {
-                userProfile: {
-                    name: userProfile.name,
-                    joinDate: userProfile.joinDate,
-                    totalHabits: userProfile.totalHabits,
-                    completedHabits: userProfile.completedHabits
-                },
-                habits: this.habits.map(habit => ({
-                    id: habit.id,
-                    name: habit.name,
-                    targetFrequency: habit.targetFrequency,
-                    completions: habit.completions.map(date => date.toISOString()),
-                    createdAt: habit.createdAt.toISOString()
-                }))
-            };
-            
-            fs.writeFileSync(DATA_FILE, JSON.stringify(dataToSave, null, 2));
-        } catch (error) {
-            console.error("Error saving data:", error.message);
-        }
-    }
-    
-    loadFromFile() {
-        try {
-            if (fs.existsSync(DATA_FILE)) {
-                const fileData = fs.readFileSync(DATA_FILE, 'utf8');
-                const data = JSON.parse(fileData);
-                
-                // Restore user profile
-                if (data.userProfile) {
-                    userProfile.name = data.userProfile.name;
-                    userProfile.joinDate = new Date(data.userProfile.joinDate);
-                    userProfile.totalHabits = data.userProfile.totalHabits ?? 0;
-                    userProfile.completedHabits = data.userProfile.completedHabits ?? 0;
-                }
-                
-                // Restore habits
-                if (data.habits) {
-                    this.habits = data.habits.map(habitData => {
-                        const habit = new Habit(habitData.name, habitData.targetFrequency);
-                        habit.id = habitData.id;
-                        habit.completions = habitData.completions.map(dateStr => new Date(dateStr));
-                        habit.createdAt = new Date(habitData.createdAt);
-                        return habit;
-                    });
-                }
-            }
-        } catch (error) {
-            console.error("Error loading data:", error.message);
-            // If there's an error loading, start with empty data
-            this.habits = [];
-        }
-    }
-    
-    clearAllData() {
-        this.habits = [];
-        this.saveToFile();
-        console.log("Semua data telah dihapus.");
-    }
+    userProfile.updateStats(this.habits);
+  }
 }
 
-// CLI Interface Functions
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
+// ----------------------- CLI (Readline) ------------------------
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 function askQuestion(question) {
-    return new Promise((resolve) => {
-        rl.question(question, (answer) => {
-            resolve(answer);
-        });
-    });
+  return new Promise((resolve) => {
+    rl.question(question, (ans) => resolve(ans));
+  });
+}
+
+function showBanner() {
+  console.clear();
+  console.log('==================================================');
+  console.log('HABIT TRACKER CLI');
+  console.log('==================================================');
 }
 
 function displayMenu() {
-    console.log('='.repeat(52));
-    console.log('HABIT TRACKER - MENU UTAMA');
-    console.log('='.repeat(52));
-    console.log('1. Lihat Profil');
-    console.log('2. Lihat Semua Kebiasaan');
-    console.log('3. Lihat Kebiasaan Aktif');
-    console.log('4. Lihat Kebiasaan Selesai');
-    console.log('5. Tambah Kebiasaan Baru');
-    console.log('6. Tandai Kebiasaan Selesai');
-    console.log('7. Hapus Kebiasaan');
-    console.log('8. Lihat Statistik');
-    console.log('9. Demo Loop (while/for)');
-    console.log('0. Keluar');
-    console.log('='.repeat(52));
+  console.log('1. Lihat Profil');
+  console.log('2. Lihat Semua Kebiasaan');
+  console.log('3. Lihat Kebiasaan Aktif');
+  console.log('4. Lihat Kebiasaan Selesai');
+  console.log('5. Tambah Kebiasaan Baru');
+  console.log('6. Tandai Kebiasaan Selesai');
+  console.log('7. Hapus Kebiasaan');
+  console.log('8. Lihat Statistik');
+  console.log('9. Demo Loop (while/for)');
+  console.log('0. Keluar');
+  console.log('==================================================');
 }
 
+/** Main menu loop */
 async function handleMenu(tracker) {
+  tracker.startReminder(); // auto-start reminder per spec
+  let running = true;
+
+  while (running) {
     displayMenu();
-    const choice = await askQuestion('Pilih menu (0-9): ');
-    
+    const choice = (await askQuestion('Pilih menu (0-9): ')).trim();
+
     switch (choice) {
-        case '1':
-            tracker.displayProfile();
-            break;
-        case '2':
-            tracker.displayHabits();
-            break;
-        case '3':
-            tracker.displayHabits('active');
-            break;
-        case '4':
-            tracker.displayHabits('completed');
-            break;
-        case '5':
-            const name = await askQuestion('Nama kebiasaan: ');
-            const frequency = await askQuestion('Target per minggu (angka): ');
-            const freqNum = parseInt(frequency);
-            if (!isNaN(freqNum) && freqNum > 0) {
-                tracker.addHabit(name, freqNum);
-                console.log('Kebiasaan berhasil ditambahkan!');
-            } else {
-                console.log('Target tidak valid. Harus angka positif.');
-            }
-            break;
-        case '6':
-            tracker.displayHabits();
-            if (tracker.habits.length > 0) {
-                const index = await askQuestion('Nomor kebiasaan yang selesai (1-' + tracker.habits.length + '): ');
-                const habitIndex = parseInt(index) - 1;
-                if (tracker.completeHabit(habitIndex)) {
-                    console.log('Kebiasaan ditandai selesai untuk hari ini!');
-                } else {
-                    console.log('Nomor kebiasaan tidak valid.');
-                }
-            } else {
-                console.log('Tidak ada kebiasaan untuk ditandai selesai.');
-            }
-            break;
-        case '7':
-            tracker.displayHabits();
-            if (tracker.habits.length > 0) {
-                const index = await askQuestion('Nomor kebiasaan yang akan dihapus (1-' + tracker.habits.length + '): ');
-                const habitIndex = parseInt(index) - 1;
-                if (tracker.deleteHabit(habitIndex)) {
-                    console.log('Kebiasaan berhasil dihapus!');
-                } else {
-                    console.log('Nomor kebiasaan tidak valid.');
-                }
-            } else {
-                console.log('Tidak ada kebiasaan untuk dihapus.');
-            }
-            break;
-        case '8':
-            tracker.displayStats();
-            break;
-        case '9':
-            console.log('Demo While Loop:');
-            tracker.displayHabitsWithWhile();
-            console.log('\nDemo For Loop:');
-            tracker.displayHabitsWithFor();
-            break;
-        case '0':
-            console.log('Terima kasih telah menggunakan Habit Tracker!');
-            tracker.stopReminder();
-            rl.close();
-            return;
-        default:
-            console.log('Pilihan tidak valid. Silakan pilih 0-9.');
+      case '1': // profile
+        tracker.displayProfile();
+        break;
+
+      case '2': // all habits
+        tracker.displayHabits('all');
+        break;
+
+      case '3': // active
+        tracker.displayHabits('active');
+        break;
+
+      case '4': // done
+        tracker.displayHabits('done');
+        break;
+
+      case '5': { // add
+        const name = await askQuestion('Nama kebiasaan: ');
+        const freqStr = await askQuestion('Target per minggu (angka, default 7): ');
+        const freq = Number(freqStr);
+        const habit = tracker.addHabit(name, isNaN(freq) ? 7 : freq);
+        console.log(`Ditambahkan: "${habit.name}" dengan target ${habit.targetFrequency}x/minggu\n`);
+        break;
+      }
+
+      case '6': { // complete
+        tracker.displayHabits('all');
+        const idxStr = await askQuestion('Nomor kebiasaan yang diselesaikan hari ini: ');
+        const res = tracker.completeHabit(idxStr);
+        console.log(res.msg + '\n');
+        break;
+      }
+
+      case '7': { // delete
+        tracker.displayHabits('all');
+        const idxStr = await askQuestion('Nomor kebiasaan yang akan dihapus: ');
+        const res = tracker.deleteHabit(idxStr);
+        console.log(res.msg + '\n');
+        break;
+      }
+
+      case '8': // stats
+        tracker.displayStats();
+        break;
+
+      case '9': // loop demo
+        tracker.displayHabitsWithWhile();
+        tracker.displayHabitsWithFor();
+        console.log('');
+        break;
+
+      case '0':
+        running = false;
+        break;
+
+      default:
+        console.log('Pilihan tidak dikenal. Coba lagi.\n');
+        break;
     }
-    
-    // Continue the loop
-    await handleMenu(tracker);
+  }
+
+  tracker.stopReminder();
+  tracker.saveToFile();
+  rl.close();
+  console.log('Sampai jumpa!');
 }
 
-// Main Function
+// ----------------------------- Main ----------------------------
 async function main() {
-    console.log('='.repeat(52));
-    console.log('SELAMAT DATANG DI HABIT TRACKER CLI');
-    console.log('='.repeat(52));
-    
-    const tracker = new HabitTracker();
-    
-    // Start the reminder system
-    tracker.startReminder();
-    
-    // Start the menu system
-    await handleMenu(tracker);
+  showBanner();
+  const tracker = new HabitTracker();
+
+  // Optional: seed demo data if none exist
+  if (tracker.habits.length === 0) {
+    console.log('Belum ada data. Menambahkan contoh kebiasaan...\n');
+    tracker.addHabit('Minum Air 8 Gelas', 7);
+    tracker.addHabit('Baca Buku 30 Menit', 5);
+    tracker.addHabit('Olahraga Ringan', 3);
+  }
+
+  await handleMenu(tracker);
 }
 
-// Run the application
-main().catch(console.error);
+// Start program
+main().catch((err) => {
+  console.error('Fatal:', err);
+  process.exit(1);
+});

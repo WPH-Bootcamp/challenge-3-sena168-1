@@ -5,7 +5,6 @@
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
-    "solution": "node app-solution.js",
     "test": "echo \"Run: node app.js to start the application\""
   },
   "keywords": [
@@ -17,13 +16,13 @@
     "assignment",
     "learning"
   ],
-  "author": "Your Name Here",
+  "author": "Student",
   "license": "ISC",
   "engines": {
     "node": ">=14.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "your-repo-url"
+    "url": "https://github.com/student/habit-tracker-cli"
   }
 }
